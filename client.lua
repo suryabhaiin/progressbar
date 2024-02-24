@@ -1,8 +1,8 @@
 local Action = {
-    name = '',
+    name = "",
     duration = 0,
-    label = '',
-    useWhileDead = false,
+    label = "",	
+    useWhileDead = false,    
     canCancel = true,
     disarm = true,
     controlDisables = {
@@ -20,262 +20,295 @@ local Action = {
     prop = {
         model = nil,
         bone = nil,
-        coords = vec3(0.0, 0.0, 0.0),
-        rotation = vec3(0.0, 0.0, 0.0),
+        coords = { x = 0.0, y = 0.0, z = 0.0 },
+        rotation = { x = 0.0, y = 0.0, z = 0.0 },
     },
     propTwo = {
         model = nil,
         bone = nil,
-        coords = vec3(0.0, 0.0, 0.0),
-        rotation = vec3(0.0, 0.0, 0.0),
+        coords = { x = 0.0, y = 0.0, z = 0.0 },
+        rotation = { x = 0.0, y = 0.0, z = 0.0 },
     },
 }
 
 local isDoingAction = false
+local disableMouse = false
 local wasCancelled = false
-local prop_net = nil
-local propTwo_net = nil
 local isAnim = false
 local isProp = false
 local isPropTwo = false
+local prop_net = nil
+local propTwo_net = nil
+local runProgThread = false
 
-local controls = {
-    disableMouse = { 1, 2, 106 },
-    disableMovement = { 30, 31, 36, 21, 75 },
-    disableCarMovement = { 63, 64, 71, 72 },
-    disableCombat = { 24, 25, 37, 47, 58, 140, 141, 142, 143, 263, 264, 257 }
-}
-
--- Functions
-
-local function loadAnimDict(dict)
-    RequestAnimDict(dict)
-    while not HasAnimDictLoaded(dict) do
-        Wait(5)
-    end
+function Progress(action, finish)
+	Process(action, nil, nil, finish)
 end
 
-local function loadModel(model)
-    RequestModel(model)
-    while not HasModelLoaded(model) do
-        Wait(5)
-    end
+
+
+function ProgressWithStartEvent(action, start, finish)
+	Process(action, start, nil, finish)
 end
 
-local function createAndAttachProp(prop, ped)
-    loadModel(prop.model)
-    local coords = GetOffsetFromEntityInWorldCoords(ped, 0.0, 0.0, 0.0)
-    local propEntity = CreateObject(GetHashKey(prop.model), coords.x, coords.y, coords.z, true, true, true)
-    local netId = ObjToNet(propEntity)
-    SetNetworkIdExistsOnAllMachines(netId, true)
-    NetworkUseHighPrecisionBlending(netId, true)
-    SetNetworkIdCanMigrate(netId, false)
-    local boneIndex = GetPedBoneIndex(ped, prop.bone or 60309)
-    AttachEntityToEntity(
-        propEntity, ped, boneIndex,
-        prop.coords.x, prop.coords.y, prop.coords.z,
-        prop.rotation.x, prop.rotation.y, prop.rotation.z,
-        true, true, false, true, 0, true
-    )
-    return netId
+function ProgressWithTickEvent(action, tick, finish)
+	Process(action, nil, tick, finish)
 end
 
-local function disableControls()
-    CreateThread(function()
-        while isDoingAction do
-            for disableType, isEnabled in pairs(Action.controlDisables) do
-                if isEnabled and controls[disableType] then
-                    for _, control in ipairs(controls[disableType]) do
-                        DisableControlAction(0, control, true)
+function ProgressWithStartAndTick(action, start, tick, finish)
+	Process(action, start, tick, finish)
+end
+
+local function isDoingSomething()
+    return isDoingAction
+end
+
+exports('Progress', Progress)
+
+exports('ProgressWithStartEvent', ProgressWithStartEvent)
+
+exports('ProgressWithTickEvent', ProgressWithTickEvent)
+
+exports('ProgressWithStartAndTick', ProgressWithStartAndTick)
+
+exports('isDoingSomething', isDoingSomething)
+
+function Process(action, start, tick, finish)
+	ActionStart()
+    Action = action
+
+    if not IsEntityDead(PlayerPedId()) or Action.useWhileDead then
+        if not isDoingAction then
+            isDoingAction = true
+            wasCancelled = false
+            isAnim = false
+            isProp = false
+            TriggerServerEvent("InteractSound_SV:PlayOnSource", "progressbar", 0.1)
+            SendNUIMessage({
+                action = "progress",
+                duration = Action.duration,
+                label = Action.label
+            })
+
+            CreateThread(function ()
+                if start ~= nil then
+                    start()
+                end
+                while isDoingAction do
+                    Wait(1)
+                    if tick ~= nil then
+                        tick()
+                    end		    
+                    if IsControlJustPressed(0, 73) then
+			if Action.canCancel then							
+                           Cancel()
+			else
+			   TriggerEvent("QBCore:Notify", "You cannot cancel")									
+			end								
+                    end
+
+                    if IsEntityDead(PlayerPedId()) and not Action.useWhileDead then
+                        Cancel()
                     end
                 end
-            end
-            if Action.controlDisables.disableCombat then
-                DisablePlayerFiring(PlayerId(), true)
+                if finish ~= nil then
+                    finish(wasCancelled)
+                end
+            end)
+        else
+            TriggerEvent("QBCore:Notify", "You are already doing something")
+        end
+    else
+        TriggerEvent("QBCore:Notify", "Cant do that action")
+    end
+end
+
+function ActionStart()
+    runProgThread = true
+    LocalPlayer.state:set("inv_busy", true, true) -- Busy
+    CreateThread(function()
+        while runProgThread do
+            if isDoingAction then
+                if not isAnim then
+                    if Action.animation ~= nil then
+                        if Action.animation.task ~= nil then
+                            TaskStartScenarioInPlace(PlayerPedId(), Action.animation.task, 0, true)
+                        elseif Action.animation.animDict ~= nil and Action.animation.anim ~= nil then
+                            if Action.animation.flags == nil then
+                                Action.animation.flags = 1
+                            end
+
+                            local player = PlayerPedId()
+                            if (DoesEntityExist(player) and not IsEntityDead(player)) then
+                                loadAnimDict( Action.animation.animDict)
+                                TaskPlayAnim(player, Action.animation.animDict, Action.animation.anim, 3.0, 3.0, -1, Action.animation.flags, 0, 0, 0, 0 )     
+                            end                        
+                        end
+                    end
+                    isAnim = true
+                end
+                if not isProp and Action.prop ~= nil and Action.prop.model ~= nil then
+                    RequestModel(Action.prop.model)
+
+                    while not HasModelLoaded(GetHashKey(Action.prop.model)) do
+                        Wait(0)
+                    end
+
+                    local pCoords = GetOffsetFromEntityInWorldCoords(PlayerPedId(), 0.0, 0.0, 0.0)
+                    local modelSpawn = CreateObject(GetHashKey(Action.prop.model), pCoords.x, pCoords.y, pCoords.z, true, true, true)
+
+                    local netid = ObjToNet(modelSpawn)
+                    SetNetworkIdExistsOnAllMachines(netid, true)
+                    NetworkSetNetworkIdDynamic(netid, true)
+                    SetNetworkIdCanMigrate(netid, false)
+                    if Action.prop.bone == nil then
+                        Action.prop.bone = 60309
+                    end
+
+                    if Action.prop.coords == nil then
+                        Action.prop.coords = { x = 0.0, y = 0.0, z = 0.0 }
+                    end
+
+                    if Action.prop.rotation == nil then
+                        Action.prop.rotation = { x = 0.0, y = 0.0, z = 0.0 }
+                    end
+
+                    AttachEntityToEntity(modelSpawn, PlayerPedId(), GetPedBoneIndex(PlayerPedId(), Action.prop.bone), Action.prop.coords.x, Action.prop.coords.y, Action.prop.coords.z, Action.prop.rotation.x, Action.prop.rotation.y, Action.prop.rotation.z, 1, 1, 0, 1, 0, 1)
+                    prop_net = netid
+
+                    isProp = true
+                    
+                    if not isPropTwo and Action.propTwo ~= nil and Action.propTwo.model ~= nil then
+                        RequestModel(Action.propTwo.model)
+
+                        while not HasModelLoaded(GetHashKey(Action.propTwo.model)) do
+                            Wait(0)
+                        end
+
+                        local pCoords = GetOffsetFromEntityInWorldCoords(PlayerPedId(), 0.0, 0.0, 0.0)
+                        local modelSpawn = CreateObject(GetHashKey(Action.propTwo.model), pCoords.x, pCoords.y, pCoords.z, true, true, true)
+
+                        local netid = ObjToNet(modelSpawn)
+                        SetNetworkIdExistsOnAllMachines(netid, true)
+                        NetworkSetNetworkIdDynamic(netid, true)
+                        SetNetworkIdCanMigrate(netid, false)
+                        if Action.propTwo.bone == nil then
+                            Action.propTwo.bone = 60309
+                        end
+
+                        if Action.propTwo.coords == nil then
+                            Action.propTwo.coords = { x = 0.0, y = 0.0, z = 0.0 }
+                        end
+
+                        if Action.propTwo.rotation == nil then
+                            Action.propTwo.rotation = { x = 0.0, y = 0.0, z = 0.0 }
+                        end
+
+                        AttachEntityToEntity(modelSpawn, PlayerPedId(), GetPedBoneIndex(PlayerPedId(), Action.propTwo.bone), Action.propTwo.coords.x, Action.propTwo.coords.y, Action.propTwo.coords.z, Action.propTwo.rotation.x, Action.propTwo.rotation.y, Action.propTwo.rotation.z, 1, 1, 0, 1, 0, 1)
+                        propTwo_net = netid
+
+                        isPropTwo = true
+                    end
+                end
+
+                DisableActions(PlayerPedId())
             end
             Wait(0)
         end
     end)
 end
 
-local function StartActions()
-    local ped = PlayerPedId()
-    if isDoingAction then
-        if not isAnim and Action.animation then
-            if Action.animation.task then
-                TaskStartScenarioInPlace(ped, Action.animation.task, 0, true)
-            else
-                local anim = Action.animation
-                if anim.animDict and anim.anim and DoesEntityExist(ped) and not IsEntityDead(ped) then
-                    loadAnimDict(anim.animDict)
-                    TaskPlayAnim(ped, anim.animDict, anim.anim, 3.0, 3.0, -1, anim.flags or 1, 0, false, false, false)
-                end
-            end
-            isAnim = true
-        end
-        if not isProp and Action.prop and Action.prop.model then
-            prop_net = createAndAttachProp(Action.prop, ped)
-            isProp = true
-        end
-        if not isPropTwo and Action.propTwo and Action.propTwo.model then
-            propTwo_net = createAndAttachProp(Action.propTwo, ped)
-            isPropTwo = true
-        end
-        disableControls()
-    end
+function Cancel()
+    isDoingAction = false    
+    wasCancelled = true
+    LocalPlayer.state:set("inv_busy", false, true) -- Not Busy
+    TriggerServerEvent("InteractSound_SV:PlayOnSource", "progressbarcancel", 0.1)
+    ActionCleanup()
+    SendNUIMessage({
+        action = "cancel"
+    })
 end
 
-local function StartProgress(action, onStart, onTick, onFinish)
-    local playerPed = PlayerPedId()
-    local isPlayerDead = IsEntityDead(playerPed)
-    if (not isPlayerDead or action.useWhileDead) and not isDoingAction then
-        isDoingAction = true
-        LocalPlayer.state:set("inv_busy", true, true) -- Remove if you don't want to make inv busy
-        Action = action
-        SendNUIMessage({
-            action = 'progress',
-            duration = action.duration,
-            label = action.label
-        })
-        StartActions()
-        CreateThread(function()
-            if onStart then onStart() end
-            while isDoingAction do
-                Wait(1)
-                if onTick then onTick() end
-                if IsControlJustPressed(0, 200) and action.canCancel then
-                    TriggerEvent('progressbar:client:cancel')
-                    wasCancelled = true
-                    break
-                end
-                if IsEntityDead(playerPed) and not action.useWhileDead then
-                    TriggerEvent('progressbar:client:cancel')
-                    wasCancelled = true
-                    break
-                end
-            end
-            if onFinish then onFinish(wasCancelled) end
-            isDoingAction = false
-        end)
-    end
+function Finish()
+    isDoingAction = false     
+    LocalPlayer.state:set("inv_busy", false, true) -- Not Busy
+    ActionCleanup()
 end
 
-local function ActionCleanup()
+function ActionCleanup()
     local ped = PlayerPedId()
-    if Action.animation then
-        if Action.animation.task or (Action.animation.animDict and Action.animation.anim) then
-            StopAnimTask(ped, Action.animation.animDict, Action.animation.anim, 1.0)
+
+    if Action.animation ~= nil then
+        if Action.animation.task ~= nil or (Action.animation.animDict ~= nil and Action.animation.anim ~= nil) then
             ClearPedSecondaryTask(ped)
+            StopAnimTask(ped, Action.animDict, Action.anim, 1.0)
         else
             ClearPedTasks(ped)
         end
     end
-    if prop_net then
-        DetachEntity(NetToObj(prop_net), true, true)
-        DeleteObject(NetToObj(prop_net))
-    end
-    if propTwo_net then
-        DetachEntity(NetToObj(propTwo_net), true, true)
-        DeleteObject(NetToObj(propTwo_net))
+    if prop_net ~= nil and propTwo_net ~= nil then
+        DetachEntity(NetToObj(prop_net), 1, 1)
+        DeleteEntity(NetToObj(prop_net))
+        DetachEntity(NetToObj(propTwo_net), 1, 1)
+        DeleteEntity(NetToObj(propTwo_net))
     end
     prop_net = nil
     propTwo_net = nil
-    isDoingAction = false
-    wasCancelled = false
-    isAnim = false
-    isProp = false
-    isPropTwo = false
-    LocalPlayer.state:set('inv_busy', false, true)
+    runProgThread = false
 end
 
--- Events
+function loadAnimDict(dict)
+	while (not HasAnimDictLoaded(dict)) do
+		RequestAnimDict(dict)
+		Wait(5)
+	end
+end
 
-RegisterNetEvent('progressbar:client:ToggleBusyness', function(bool)
-    isDoingAction = bool
-end)
+function DisableActions(ped)
+    if Action.controlDisables.disableMouse then
+        DisableControlAction(0, 1, true) -- LookLeftRight
+        DisableControlAction(0, 2, true) -- LookUpDown
+        DisableControlAction(0, 106, true) -- VehicleMouseControlOverride
+    end
 
-RegisterNetEvent('progressbar:client:progress', function(action, finish)
-    StartProgress(action, nil, nil, finish)
-end)
+    if Action.controlDisables.disableMovement then
+        DisableControlAction(0, 30, true) -- disable left/right
+        DisableControlAction(0, 31, true) -- disable forward/back
+        DisableControlAction(0, 36, true) -- INPUT_DUCK
+        DisableControlAction(0, 21, true) -- disable sprint
+    end
 
-RegisterNetEvent('progressbar:client:ProgressWithStartEvent', function(action, start, finish)
-    StartProgress(action, start, nil, finish)
-end)
+    if Action.controlDisables.disableCarMovement then
+        DisableControlAction(0, 63, true) -- veh turn left
+        DisableControlAction(0, 64, true) -- veh turn right
+        DisableControlAction(0, 71, true) -- veh forward
+        DisableControlAction(0, 72, true) -- veh backwards
+        DisableControlAction(0, 75, true) -- disable exit vehicle
+    end
 
-RegisterNetEvent('progressbar:client:ProgressWithTickEvent', function(action, tick, finish)
-    StartProgress(action, nil, tick, finish)
-end)
-
-RegisterNetEvent('progressbar:client:ProgressWithStartAndTick', function(action, start, tick, finish)
-    StartProgress(action, start, tick, finish)
-end)
-
-RegisterNetEvent('progressbar:client:cancel', function()
-    ActionCleanup()
-    SendNUIMessage({
-        action = 'cancel'
-    })
-end)
-
--- NUI Callback
+    if Action.controlDisables.disableCombat then
+        DisablePlayerFiring(PlayerId(), true) -- Disable weapon firing
+        DisableControlAction(0, 24, true) -- disable attack
+        DisableControlAction(0, 25, true) -- disable aim
+        DisableControlAction(1, 37, true) -- disable weapon select
+        DisableControlAction(0, 47, true) -- disable weapon
+        DisableControlAction(0, 58, true) -- disable weapon
+        DisableControlAction(0, 140, true) -- disable melee
+        DisableControlAction(0, 141, true) -- disable melee
+        DisableControlAction(0, 142, true) -- disable melee
+        DisableControlAction(0, 143, true) -- disable melee
+        DisableControlAction(0, 263, true) -- disable melee
+        DisableControlAction(0, 264, true) -- disable melee
+        DisableControlAction(0, 257, true) -- disable melee
+    end
+end
 
 RegisterNUICallback('FinishAction', function(data, cb)
-    ActionCleanup()
-    cb('ok')
+	Finish()
 end)
 
--- Exports
-
-local function Progress(action, finish)
-    StartProgress(action, nil, nil, finish)
-end
-exports('Progress', Progress)
-
-local function ProgressWithStartEvent(action, start, finish)
-    StartProgress(action, start, nil, finish)
-end
-exports('ProgressWithStartEvent', ProgressWithStartEvent)
-
-local function ProgressWithTickEvent(action, tick, finish)
-    StartProgress(action, nil, tick, finish)
-end
-exports('ProgressWithTickEvent', ProgressWithTickEvent)
-
-local function ProgressWithStartAndTick(action, start, tick, finish)
-    StartProgress(action, start, tick, finish)
-end
-exports('ProgressWithStartAndTick', ProgressWithStartAndTick)
-
-local function isDoingSomething()
+exports('isAction', function()   
     return isDoingAction
-end
-exports('isDoingSomething', isDoingSomething)
+end)
 
-
-
-
-
--- Debug
--- Assuming QBCore and QBCore.Functions.Progressbar are available
-local QBCore = exports['qb-core']:GetCoreObject()
-
-RegisterCommand('lol', function(source, args)
-        QBCore.Functions.Progressbar("attach_car", "Loading", 10000, false, true, {
-            disableMovement = false,
-            disableCarMovement = true,
-            disableMouse = false,
-            disableCombat = true,
-        }, {
-            animDict = "missheistdockssetup1clipboard@idle_a",
-            anim = "idle_a",
-            flags = 49,
-        }, {}, {}, function() -- Done
-            print("lol")
-        end, function() -- Cancel
-            TriggerEvent("chat:addMessage", {
-                color = {255, 0, 0},
-                multiline = true,
-                args = {"System", "Failed to attach the car!"}
-            })
-        end)
-end, false)
+exports('Progress', Progress)
